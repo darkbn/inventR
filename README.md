@@ -51,7 +51,7 @@ listes qui lui sont attribuées).
 ## Installation
 
 ```bash
-git clone <url-du-depot> InventAir
+git clone https://github.com/darkbn/inventR.git InventAir
 cd InventAir
 
 # 1. Dépendances
