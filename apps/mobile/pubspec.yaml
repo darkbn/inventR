@@ -1,0 +1,55 @@
+name: inventair
+description: Saisie d'inventaire physique en entrepôt — application terrain InventAir.
+publish_to: none
+
+# versionName+versionCode. Le code est incrémenté à chaque publication.
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # État et injection
+  flutter_riverpod: ^2.6.1
+
+  # Réseau
+  dio: ^5.7.0
+  connectivity_plus: ^6.1.0
+
+  # Stockage
+  drift: ^2.22.0
+  sqlite3_flutter_libs: ^0.5.26
+  path_provider: ^2.1.5
+  path: ^1.9.0
+  flutter_secure_storage: ^9.2.2
+
+  # Lecture de QR codes
+  mobile_scanner: ^5.2.3
+
+  # Divers
+  uuid: ^4.5.1
+  intl: ^0.19.0
+  collection: ^1.18.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  build_runner: ^2.4.13
+  drift_dev: ^2.22.0
+  flutter_launcher_icons: ^0.14.1
+
+flutter:
+  uses-material-design: true
+
+# Icône de l'application, générée pour toutes les densités.
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: assets/icon/icon.png
+  adaptive_icon_background: "#1F3A5F"
+  adaptive_icon_foreground: assets/icon/icon_foreground.png
+  min_sdk_android: 24

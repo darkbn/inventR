@@ -1,0 +1,32 @@
+{
+  "name": "inventair",
+  "version": "0.1.0",
+  "private": true,
+  "description": "InventAir — gestion d'inventaire physique (web + Android + API)",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "packageManager": "pnpm@11.5.1",
+  "scripts": {
+    "api:dev": "pnpm --filter @inventair/api start:dev",
+    "api:build": "pnpm --filter @inventair/api build",
+    "api:test": "pnpm --filter @inventair/api test",
+    "api:test:e2e": "pnpm --filter @inventair/api test:e2e",
+    "web:dev": "pnpm --filter @inventair/web dev",
+    "web:build": "pnpm --filter @inventair/web build",
+    "db:migrate": "pnpm --filter @inventair/api prisma:migrate",
+    "db:deploy": "pnpm --filter @inventair/api prisma:deploy",
+    "db:seed": "pnpm --filter @inventair/api prisma:seed",
+    "db:studio": "pnpm --filter @inventair/api prisma:studio",
+    "db:reset": "pnpm --filter @inventair/api prisma:reset",
+    "lint": "pnpm -r lint",
+    "format": "pnpm -r format",
+    "test": "pnpm -r test",
+    "docker:dev": "docker compose up -d",
+    "docker:dev:down": "docker compose down",
+    "api:smoke": "pnpm --filter @inventair/api test:smoke",
+    "web:test": "pnpm --filter @inventair/web test",
+    "web:preview": "pnpm --filter @inventair/web preview",
+    "web:gen:api": "pnpm --filter @inventair/web gen:api"
+  }
+}

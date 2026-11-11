@@ -1,0 +1,12 @@
+# Modèle de configuration de signature.
+#
+# Copier en `key.properties` (exclu du dépôt) et renseigner les valeurs.
+# Générer le magasin de clés avec :
+#
+#   keytool -genkeypair -v -keystore inventair-release.jks \
+#     -keyalg RSA -keysize 2048 -validity 10000 -alias inventair
+#
+storePassword=CHANGEME
+keyPassword=CHANGEME
+keyAlias=inventair
+storeFile=../keystore/inventair-release.jks

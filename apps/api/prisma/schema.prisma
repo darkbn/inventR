@@ -1,0 +1,631 @@
+// ------------------------------------------------------------------------------
+// InventAir — modèle de données
+//
+// Conventions :
+//  - Les tables et colonnes PostgreSQL sont en snake_case (@map / @@map).
+//  - Le schéma PostgreSQL dédié est "inventory" (paramètre ?schema= de DATABASE_URL).
+//  - Les colonnes d'audit created_by / updated_by sont de simples UUID sans relation
+//    Prisma : les relier à User ajouterait une vingtaine de relations inverses sans
+//    valeur fonctionnelle. L'intégrité fine est assurée par la table activity_logs.
+//  - Les contraintes CHECK (quantités >= 0, round >= 1, …) sont ajoutées par la
+//    migration SQL `_business_constraints` : Prisma ne sait pas les déclarer.
+// ------------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// Énumérations
+// ============================================================================
+
+enum Role {
+  ADMIN
+  SUPERVISOR
+  USER
+}
+
+enum CampaignStatus {
+  DRAFT // en préparation : listes et affectations modifiables
+  OPEN // ouverte, comptage pas encore commencé
+  COUNTING // au moins un comptage enregistré
+  PENDING_CLOSURE // clôture demandée, litiges à résoudre
+  CLOSED // clôturée, irréversible sauf réouverture ADMIN
+}
+
+enum ListStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+  ARCHIVED
+}
+
+/// Statut d'une ligne d'inventaire, calculé par InventoryCalculationService.
+enum ItemStatus {
+  PENDING // aucun comptage
+  COUNTED // compté (Méthode 1)
+  AWAITING_SECOND_COUNT // Méthodes 2 et 3 : second comptage attendu, bloque la clôture
+  AWAITING_THIRD_COUNT // Méthode 3 : troisième comptage attendu, bloque la clôture
+  UNDER_INVESTIGATION // Méthode 3 : trois comptages non concluants, enquête du superviseur requise
+  DISCREPANCY // Méthode 2 : comptages divergents, arbitrage requis
+  CONFIRMED // comptages concordants, ou valeur tranchée par le superviseur
+  NOT_FOUND // déclaré introuvable → quantité 0 après confirmation de clôture
+}
+
+enum CountSource {
+  MOBILE
+  WEB
+}
+
+enum CountStatus {
+  VALID
+  CANCELLED
+}
+
+enum ImportStatus {
+  PENDING // fichier déposé, analyse en cours
+  VALIDATED // dry-run terminé, prêt à être appliqué
+  APPLIED // lignes créées en base
+  REJECTED // rejeté (erreurs bloquantes ou abandon)
+}
+
+enum AssignmentEntityType {
+  CAMPAIGN
+  LIST
+}
+
+enum AssignmentAction {
+  ASSIGN
+  UNASSIGN
+}
+
+enum ReportType {
+  CAMPAIGN_SUMMARY
+  COUNTS_BY_USER
+  DISCREPANCIES
+  QR_LABELS
+}
+
+enum ReportFormat {
+  PDF
+  XLSX
+}
+
+// ============================================================================
+// Identité et sécurité
+// ============================================================================
+
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  email        String    @unique @db.VarChar(255)
+  username     String    @unique @db.VarChar(64)
+  fullName     String    @map("full_name") @db.VarChar(160)
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  role         Role      @default(USER)
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz(3)
+
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdById String?  @map("created_by") @db.Uuid
+  updatedById String?  @map("updated_by") @db.Uuid
+
+  refreshTokens        RefreshToken[]
+  counts               Count[]              @relation("CountAuthor")
+  cancelledCounts      Count[]              @relation("CountCancelledBy")
+  campaignAssignments  CampaignAssignment[] @relation("CampaignAssignee")
+  grantedCampaignRoles CampaignAssignment[] @relation("CampaignAssigner")
+  listAssignments      ListAssignment[]     @relation("ListAssignee")
+  grantedListRoles     ListAssignment[]     @relation("ListAssigner")
+  closedCampaigns      Campaign[]           @relation("CampaignClosedBy")
+  reopenedCampaigns    Campaign[]           @relation("CampaignReopenedBy")
+  itemsMarkedNotFound  InventoryItem[]      @relation("ItemNotFoundBy")
+  arbitratedItems      InventoryItem[]      @relation("ItemArbitratedBy")
+  manuallyAddedItems   InventoryItem[]      @relation("ItemAddedBy")
+  assignmentHistory    AssignmentHistory[]  @relation("AssignmentHistoryTarget")
+  performedAssignments AssignmentHistory[]  @relation("AssignmentHistoryActor")
+  activityLogs         ActivityLog[]
+  generatedReports     Report[]
+
+  @@index([role, isActive])
+  @@map("users")
+}
+
+/// Refresh tokens révocables : seul le hash est stocké, jamais le token en clair.
+model RefreshToken {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash    String    @unique @map("token_hash") @db.VarChar(255)
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt    DateTime? @map("revoked_at") @db.Timestamptz(3)
+  /// Rotation : identifiant du token qui remplace celui-ci.
+  replacedById String?   @map("replaced_by") @db.Uuid
+  userAgent    String?   @map("user_agent") @db.VarChar(255)
+  ip           String?   @db.VarChar(64)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ============================================================================
+// Référentiels
+// ============================================================================
+
+model Warehouse {
+  id       String  @id @default(uuid()) @db.Uuid
+  code     String  @unique @db.VarChar(32)
+  label    String  @db.VarChar(160)
+  isActive Boolean @default(true) @map("is_active")
+
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdById String?  @map("created_by") @db.Uuid
+  updatedById String?  @map("updated_by") @db.Uuid
+
+  locations Location[]
+  campaigns Campaign[]
+
+  @@map("warehouses")
+}
+
+/// Emplacement physique. Les lignes sans emplacement dans le fichier source sont
+/// rattachées à l'emplacement virtuel `NON-LOCALISE` du magasin (isVirtual = true),
+/// ce qui garantit une contrainte d'unicité stricte sur les lignes d'inventaire.
+model Location {
+  id          String    @id @default(uuid()) @db.Uuid
+  warehouseId String    @map("warehouse_id") @db.Uuid
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  code           String  @db.VarChar(64)
+  label          String? @db.VarChar(160)
+  /// Forme normalisée (majuscules, sans accents, espaces compressés) : sert à la
+  /// recherche et à la détection des variantes orthographiques lors de l'import.
+  normalizedCode String  @map("normalized_code") @db.VarChar(64)
+
+  /// Décomposition du format `allée-travée-niveau-case` (ex. 1-1-C-7) pour un tri
+  /// physique numérique : sans cela, "10-…" passerait avant "2-…".
+  aisle Int?
+  bay   Int?
+  level String? @db.VarChar(8)
+  slot  Int?
+
+  isVirtual Boolean @default(false) @map("is_virtual")
+  isActive  Boolean @default(true) @map("is_active")
+
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdById String?  @map("created_by") @db.Uuid
+  updatedById String?  @map("updated_by") @db.Uuid
+
+  items              InventoryItem[]
+  defaultForArticles Article[]       @relation("ArticleDefaultLocation")
+
+  @@unique([warehouseId, code])
+  @@index([warehouseId, normalizedCode])
+  @@index([warehouseId, aisle, bay, level, slot])
+  @@map("locations")
+}
+
+model Category {
+  id       String  @id @default(uuid()) @db.Uuid
+  code     String  @unique @db.VarChar(32)
+  label    String  @db.VarChar(160)
+  isActive Boolean @default(true) @map("is_active")
+
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdById String?  @map("created_by") @db.Uuid
+  updatedById String?  @map("updated_by") @db.Uuid
+
+  articles Article[]
+
+  @@map("categories")
+}
+
+model Article {
+  id              String  @id @default(uuid()) @db.Uuid
+  code            String  @unique @db.VarChar(64)
+  designation     String  @db.VarChar(255)
+  /// Unité de gestion issue du fichier source : Unité, JEUX, KITS, Metre, Litre…
+  unit            String  @default("Unité") @db.VarChar(32)
+  brand           String? @db.VarChar(120)
+  /// Référence fabricant : second critère de recherche sur le terrain.
+  manufacturerRef String? @map("manufacturer_ref") @db.VarChar(120)
+
+  categoryId String?   @map("category_id") @db.Uuid
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  defaultLocationId String?   @map("default_location_id") @db.Uuid
+  defaultLocation   Location? @relation("ArticleDefaultLocation", fields: [defaultLocationId], references: [id], onDelete: SetNull)
+
+  /// Dernier prix moyen pondéré connu. La valorisation d'une campagne utilise le
+  /// Pmp figé sur la ligne (inventory_items.unit_price), pas celui-ci.
+  lastPmp  Decimal @default(0) @map("last_pmp") @db.Decimal(16, 4)
+  isActive Boolean @default(true) @map("is_active")
+
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdById String?  @map("created_by") @db.Uuid
+  updatedById String?  @map("updated_by") @db.Uuid
+
+  items InventoryItem[]
+
+  @@index([designation])
+  @@index([brand])
+  @@index([manufacturerRef])
+  @@index([categoryId])
+  @@map("articles")
+}
+
+// ============================================================================
+// Paramétrage extensible des campagnes
+// ============================================================================
+
+/// Type de campagne — table et non enum, pour pouvoir en ajouter sans migration.
+model CampaignType {
+  id       String  @id @default(uuid()) @db.Uuid
+  code     String  @unique @db.VarChar(32)
+  label    String  @db.VarChar(120)
+  isActive Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  campaigns Campaign[]
+
+  @@map("campaign_types")
+}
+
+/// Méthode de calcul de la quantité finale. `code` est l'identifiant technique
+/// résolu par InventoryCalculationService ; ajouter une méthode = ajouter une ligne
+/// ici + une stratégie dans le service, sans changement de schéma.
+model InventoryMethod {
+  id          String  @id @default(uuid()) @db.Uuid
+  code        String  @unique @db.VarChar(32)
+  label       String  @db.VarChar(120)
+  description String? @db.Text
+  /// Paramètres propres à la méthode (ex. nombre de comptages requis, tolérance).
+  config      Json    @default("{}")
+  isActive    Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  campaigns Campaign[]
+
+  @@map("inventory_methods")
+}
+
+// ============================================================================
+// Campagnes, listes et affectations
+// ============================================================================
+
+model Campaign {
+  id   String @id @default(uuid()) @db.Uuid
+  code String @unique @db.VarChar(64)
+  name String @db.VarChar(160)
+
+  campaignTypeId String       @map("campaign_type_id") @db.Uuid
+  campaignType   CampaignType @relation(fields: [campaignTypeId], references: [id], onDelete: Restrict)
+
+  inventoryMethodId String          @map("inventory_method_id") @db.Uuid
+  inventoryMethod   InventoryMethod @relation(fields: [inventoryMethodId], references: [id], onDelete: Restrict)
+
+  warehouseId String    @map("warehouse_id") @db.Uuid
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  status CampaignStatus @default(DRAFT)
+
+  /// Numéro de passage : 1 = campagne initiale, 2 = recomptage des écarts, etc.
+  round Int @default(1)
+
+  parentCampaignId String?    @map("parent_campaign_id") @db.Uuid
+  parentCampaign   Campaign?  @relation("CampaignRounds", fields: [parentCampaignId], references: [id], onDelete: SetNull)
+  childCampaigns   Campaign[] @relation("CampaignRounds")
+
+  startedAt DateTime? @map("started_at") @db.Timestamptz(3)
+  closedAt  DateTime? @map("closed_at") @db.Timestamptz(3)
+
+  closedById String? @map("closed_by") @db.Uuid
+  closedBy   User?   @relation("CampaignClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+
+  /// Horodatage de la mise à 0 des articles non trouvés, consécutive à la
+  /// confirmation explicite du superviseur lors de la clôture.
+  missingZeroedAt DateTime? @map("missing_zeroed_at") @db.Timestamptz(3)
+
+  /// Réouverture : action administrative explicite, motif obligatoire.
+  reopenedAt   DateTime? @map("reopened_at") @db.Timestamptz(3)
+  reopenedById String?   @map("reopened_by") @db.Uuid
+  reopenedBy   User?     @relation("CampaignReopenedBy", fields: [reopenedById], references: [id], onDelete: SetNull)
+  reopenReason String?   @map("reopen_reason") @db.Text
+
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdById String?  @map("created_by") @db.Uuid
+  updatedById String?  @map("updated_by") @db.Uuid
+
+  lists       InventoryList[]
+  assignments CampaignAssignment[]
+  reports     Report[]
+
+  @@index([status, round])
+  @@index([warehouseId, status])
+  @@index([parentCampaignId])
+  @@map("campaigns")
+}
+
+/// Affectation d'une personne à une campagne. L'état courant vit ici ;
+/// l'historique complet (y compris les retraits) est dans assignment_history.
+model CampaignAssignment {
+  id         String   @id @default(uuid()) @db.Uuid
+  campaignId String   @map("campaign_id") @db.Uuid
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  userId String @map("user_id") @db.Uuid
+  user   User   @relation("CampaignAssignee", fields: [userId], references: [id], onDelete: Cascade)
+
+  assignedById String?  @map("assigned_by") @db.Uuid
+  assignedBy   User?    @relation("CampaignAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
+  assignedAt   DateTime @default(now()) @map("assigned_at") @db.Timestamptz(3)
+
+  @@unique([campaignId, userId])
+  @@index([userId])
+  @@map("campaign_assignments")
+}
+
+/// Liste d'inventaire : découpage opérationnel d'une campagne (zone, magasinier,
+/// périmètre). C'est l'unité affectée aux utilisateurs et alimentée par un import.
+model InventoryList {
+  id         String   @id @default(uuid()) @db.Uuid
+  campaignId String   @map("campaign_id") @db.Uuid
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  code        String     @db.VarChar(64)
+  name        String     @db.VarChar(160)
+  description String?    @db.Text
+  status      ListStatus @default(DRAFT)
+
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdById String?  @map("created_by") @db.Uuid
+  updatedById String?  @map("updated_by") @db.Uuid
+
+  items         InventoryItem[]
+  assignments   ListAssignment[]
+  importBatches ImportBatch[]
+
+  @@unique([campaignId, code])
+  @@index([campaignId, status])
+  @@map("inventory_lists")
+}
+
+model ListAssignment {
+  id     String        @id @default(uuid()) @db.Uuid
+  listId String        @map("list_id") @db.Uuid
+  list   InventoryList @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  userId String @map("user_id") @db.Uuid
+  user   User   @relation("ListAssignee", fields: [userId], references: [id], onDelete: Cascade)
+
+  assignedById String?  @map("assigned_by") @db.Uuid
+  assignedBy   User?    @relation("ListAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
+  assignedAt   DateTime @default(now()) @map("assigned_at") @db.Timestamptz(3)
+
+  @@unique([listId, userId])
+  @@index([userId])
+  @@map("list_assignments")
+}
+
+// ============================================================================
+// Lignes d'inventaire et comptages
+// ============================================================================
+
+model InventoryItem {
+  id     String        @id @default(uuid()) @db.Uuid
+  listId String        @map("list_id") @db.Uuid
+  list   InventoryList @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  articleId String  @map("article_id") @db.Uuid
+  article   Article @relation(fields: [articleId], references: [id], onDelete: Restrict)
+
+  /// Jamais NULL : les lignes sans emplacement pointent vers l'emplacement virtuel
+  /// `NON-LOCALISE` du magasin.
+  locationId String   @map("location_id") @db.Uuid
+  location   Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+
+  /// Numéro de ligne du fichier source, pour tracer l'origine d'une ligne.
+  lineNo Int @map("line_no")
+
+  theoreticalQty Decimal @map("theoretical_qty") @db.Decimal(14, 3)
+
+  /// Pmp figé à l'import : la valorisation d'une campagne close ne doit pas bouger
+  /// si le prix de l'article évolue ensuite.
+  unitPrice Decimal @default(0) @map("unit_price") @db.Decimal(16, 4)
+
+  /// Quantité retenue, calculée par InventoryCalculationService. NULL tant que la
+  /// ligne n'est pas résolue (ex. Méthode 2 en attente d'un second comptage).
+  finalQty Decimal? @map("final_qty") @db.Decimal(14, 3)
+
+  /// Ligne absente du fichier source, ajoutée sur le terrain parce que l'article
+  /// a été trouvé en rayon sans figurer dans l'extraction SAP. Sa quantité
+  /// théorique est nulle par construction : tout ce qui est compté est un
+  /// surplus. Distinguée des lignes importées pour que les rapports puissent
+  /// l'isoler et que le gestionnaire sache quoi créer dans l'ERP.
+  isManual    Boolean   @default(false) @map("is_manual")
+  addedById   String?   @map("added_by") @db.Uuid
+  addedBy     User?     @relation("ItemAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+  addedAt     DateTime? @map("added_at") @db.Timestamptz(3)
+
+  /// Valeur tranchée par le superviseur : arbitrage d'un litige (Méthode 2) ou
+  /// enquête de quatrième niveau (Méthode 3). Le motif est obligatoire.
+  arbitratedQty   Decimal?  @map("arbitrated_qty") @db.Decimal(14, 3)
+  arbitratedById  String?   @map("arbitrated_by") @db.Uuid
+  arbitratedBy    User?     @relation("ItemArbitratedBy", fields: [arbitratedById], references: [id], onDelete: SetNull)
+  arbitratedAt    DateTime? @map("arbitrated_at") @db.Timestamptz(3)
+  arbitrationNote String?   @map("arbitration_note") @db.Text
+
+  status ItemStatus @default(PENDING)
+
+  notFoundAt   DateTime? @map("not_found_at") @db.Timestamptz(3)
+  notFoundById String?   @map("not_found_by") @db.Uuid
+  notFoundBy   User?     @relation("ItemNotFoundBy", fields: [notFoundById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  counts Count[]
+
+  @@unique([listId, articleId, locationId])
+  @@index([listId, status])
+  @@index([listId, isManual])
+  @@index([listId, locationId])
+  @@index([locationId])
+  @@index([articleId])
+  @@map("inventory_items")
+}
+
+/// Comptage unitaire. Un article peut être compté par plusieurs utilisateurs :
+/// c'est la méthode de la campagne qui décide comment ces comptages se combinent.
+model Count {
+  id     String        @id @default(uuid()) @db.Uuid
+  itemId String        @map("item_id") @db.Uuid
+  item   InventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  userId String @map("user_id") @db.Uuid
+  user   User   @relation("CountAuthor", fields: [userId], references: [id], onDelete: Restrict)
+
+  quantity  Decimal  @db.Decimal(14, 3)
+  countedAt DateTime @default(now()) @map("counted_at") @db.Timestamptz(3)
+
+  source CountSource @default(MOBILE)
+
+  /// UUID généré par le client avant l'envoi : garantit l'idempotence de la
+  /// synchronisation hors ligne (un comptage rejoué n'est jamais dupliqué).
+  clientUuid String  @unique @map("client_uuid") @db.Uuid
+  deviceId   String? @map("device_id") @db.VarChar(120)
+  note       String? @db.Text
+
+  status        CountStatus @default(VALID)
+  cancelledById String?     @map("cancelled_by") @db.Uuid
+  cancelledBy   User?       @relation("CountCancelledBy", fields: [cancelledById], references: [id], onDelete: SetNull)
+  cancelledAt   DateTime?   @map("cancelled_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([itemId, status])
+  @@index([userId, countedAt])
+  @@index([itemId, userId, countedAt])
+  @@map("counts")
+}
+
+// ============================================================================
+// Imports
+// ============================================================================
+
+model ImportBatch {
+  id     String        @id @default(uuid()) @db.Uuid
+  listId String        @map("list_id") @db.Uuid
+  list   InventoryList @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  filename    String       @db.VarChar(255)
+  storagePath String       @map("storage_path") @db.VarChar(512)
+  status      ImportStatus @default(PENDING)
+
+  rowsTotal Int @default(0) @map("rows_total")
+  rowsOk    Int @default(0) @map("rows_ok")
+  rowsError Int @default(0) @map("rows_error")
+
+  /// Erreurs bloquantes, une entrée par ligne rejetée : { line, column, code, message }.
+  errors   Json @default("[]")
+  /// Avertissements non bloquants : création d'article/emplacement, variante proche…
+  warnings Json @default("[]")
+  /// Options choisies par le superviseur au moment de l'import.
+  options  Json @default("{}")
+
+  appliedAt DateTime? @map("applied_at") @db.Timestamptz(3)
+
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdById String?  @map("created_by") @db.Uuid
+
+  @@index([listId, status])
+  @@map("import_batches")
+}
+
+// ============================================================================
+// Audit
+// ============================================================================
+
+/// Historique de TOUTES les modifications d'affectation (campagne et liste),
+/// y compris les retraits — exigence métier explicite.
+model AssignmentHistory {
+  id         String               @id @default(uuid()) @db.Uuid
+  entityType AssignmentEntityType @map("entity_type")
+  entityId   String               @map("entity_id") @db.Uuid
+
+  userId String @map("user_id") @db.Uuid
+  user   User   @relation("AssignmentHistoryTarget", fields: [userId], references: [id], onDelete: Cascade)
+
+  action AssignmentAction
+
+  performedById String?  @map("performed_by") @db.Uuid
+  performedBy   User?    @relation("AssignmentHistoryActor", fields: [performedById], references: [id], onDelete: SetNull)
+  performedAt   DateTime @default(now()) @map("performed_at") @db.Timestamptz(3)
+
+  payload Json @default("{}")
+
+  @@index([entityType, entityId])
+  @@index([userId, performedAt])
+  @@map("assignment_history")
+}
+
+/// Journal des actions sensibles : création, modification, import, comptage, clôture.
+model ActivityLog {
+  id String @id @default(uuid()) @db.Uuid
+
+  actorId String? @map("actor_id") @db.Uuid
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  action     String  @db.VarChar(80)
+  entityType String  @map("entity_type") @db.VarChar(64)
+  entityId   String? @map("entity_id") @db.VarChar(64)
+
+  metadata  Json    @default("{}")
+  ip        String? @db.VarChar(64)
+  userAgent String? @map("user_agent") @db.VarChar(255)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([actorId, createdAt])
+  @@index([entityType, entityId])
+  @@index([action, createdAt])
+  @@map("activity_logs")
+}
+
+model Report {
+  id         String   @id @default(uuid()) @db.Uuid
+  campaignId String   @map("campaign_id") @db.Uuid
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  type        ReportType
+  format      ReportFormat
+  storagePath String       @map("storage_path") @db.VarChar(512)
+  sizeBytes   Int?         @map("size_bytes")
+
+  generatedById String? @map("generated_by") @db.Uuid
+  generatedBy   User?   @relation(fields: [generatedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([campaignId, type])
+  @@map("reports")
+}

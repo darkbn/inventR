@@ -1,0 +1,178 @@
+# ------------------------------------------------------------------------------
+# InventAir — surcouche de PRODUCTION.
+#
+# S'utilise TOUJOURS en superposition du fichier de base :
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Ce que cette surcouche change par rapport au développement :
+#   - PostgreSQL n'écoute plus que sur le réseau interne (aucun port publié) ;
+#   - l'API et le web tournent en image compilée, sans montage de sources ;
+#   - seul le reverse proxy expose des ports au monde extérieur (80 et 443) ;
+#   - pgAdmin n'est jamais démarré (son profil « tools » n'est pas activé) ;
+#   - un conteneur de sauvegarde produit un dump quotidien.
+#
+# Alias pratique : export COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
+# ------------------------------------------------------------------------------
+
+services:
+  # ---------------------------------------------------------------------------
+  postgres:
+    # Liste vide = aucun port publié sur l'hôte. La base n'est joignable que
+    # depuis le réseau Docker privé. C'est volontairement une rupture avec le
+    # fichier de développement, qui la publiait sur 127.0.0.1.
+    ports: []
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: ${TZ:-Africa/Algiers}
+    # Les imports volumineux et les agrégats du tableau de bord travaillent
+    # mieux avec un peu de mémoire partagée que les 64 Mo par défaut.
+    shm_size: 256mb
+    command:
+      - postgres
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=16MB
+    logging: &default_logging
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+
+  # ---------------------------------------------------------------------------
+  api:
+    # Le service n'est plus derrière le profil « full » : en production il fait
+    # partie du socle.
+    #
+    # La chaîne vide, et non une liste vide : Compose ignore purement et
+    # simplement `profiles: []` à la fusion, et le service resterait derrière
+    # son profil — `proxy` échouerait alors sur « depends on undefined service
+    # api ». Une liste contenant la chaîne vide, elle, remplace bien la valeur
+    # de base et laisse le service toujours actif.
+    profiles: ['']
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: production
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=inventory
+      LOG_PRETTY: 'false'
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Le CORS est restreint au domaine public. Le frontend étant servi par le
+      # même proxy, c'est en pratique une même origine : cette valeur ne sert
+      # qu'aux éventuels clients tiers (application mobile sur un autre hôte).
+      CORS_ORIGINS: https://${PUBLIC_DOMAIN}
+      STORAGE_UPLOAD_DIR: /app/storage/uploads
+      STORAGE_REPORT_DIR: /app/storage/reports
+      # Le seed n'est joué qu'au tout premier démarrage, puis remis à false.
+      RUN_SEED_ON_START: ${RUN_SEED_ON_START:-false}
+    env_file:
+      - .env
+    # Aucun port publié : le proxy atteint l'API par le réseau interne.
+    ports: []
+    volumes:
+      - uploads:/app/storage/uploads
+      - reports:/app/storage/reports
+    logging: *default_logging
+
+  # ---------------------------------------------------------------------------
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: production
+      args:
+        # Vide : le client appelle « /api/v1 » sur la même origine.
+        VITE_API_BASE_URL: ''
+    container_name: inventair-web
+    restart: always
+    ports: []
+    networks:
+      - inventair
+    logging: *default_logging
+
+  # ---------------------------------------------------------------------------
+  proxy:
+    image: nginx:1.27-alpine
+    container_name: inventair-proxy
+    restart: always
+    depends_on:
+      - api
+      - web
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+      # Sans ce filtre, envsubst remplacerait aussi les variables de nginx
+      # lui-même ($host, $remote_addr…) par du vide.
+      NGINX_ENVSUBST_FILTER: '^PUBLIC_DOMAIN$$'
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./docker/nginx/proxy.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - certbot-conf:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    # Let's Encrypt renouvelle tous les 60 jours ; un rechargement toutes les
+    # 6 h suffit largement à prendre en compte un certificat renouvelé, sans
+    # jamais interrompre les connexions en cours (« reload », pas « restart »).
+    command: >-
+      sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done &
+             exec nginx -g 'daemon off;'"
+    networks:
+      - inventair
+    logging: *default_logging
+
+  # ---------------------------------------------------------------------------
+  certbot:
+    image: certbot/certbot:latest
+    container_name: inventair-certbot
+    restart: always
+    volumes:
+      - certbot-conf:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    # Tentative toutes les 12 h, conformément à la recommandation de l'ACME :
+    # certbot ne renouvelle réellement qu'à moins de 30 jours de l'échéance, et
+    # l'horaire décalé évite les pics de charge sur leur infrastructure.
+    entrypoint: >-
+      sh -c "trap exit TERM;
+             while :; do certbot renew --webroot --webroot-path /var/www/certbot;
+             sleep 12h & wait $${!}; done"
+    logging: *default_logging
+
+  # ---------------------------------------------------------------------------
+  backup:
+    image: postgres:17-alpine
+    container_name: inventair-backup
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      TZ: ${TZ:-Africa/Algiers}
+    volumes:
+      - ./docker/backup:/scripts:ro
+      - backups:/backups
+    entrypoint: ['/bin/sh', '/scripts/pg_backup.sh', '--loop']
+    networks:
+      - inventair
+    logging: *default_logging
+
+volumes:
+  certbot-conf:
+  certbot-www:
+  backups:

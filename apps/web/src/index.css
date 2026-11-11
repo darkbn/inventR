@@ -1,0 +1,98 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 215 28% 17%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 215 28% 17%;
+
+    --primary: 214 51% 25%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 214 32% 95%;
+    --secondary-foreground: 214 51% 25%;
+
+    --muted: 214 20% 96%;
+    --muted-foreground: 215 16% 47%;
+
+    --accent: 214 32% 93%;
+    --accent-foreground: 214 51% 25%;
+
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214 20% 89%;
+    --input: 214 20% 89%;
+    --ring: 214 51% 35%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 215 28% 10%;
+    --foreground: 214 20% 95%;
+
+    --card: 215 28% 13%;
+    --card-foreground: 214 20% 95%;
+
+    --primary: 214 60% 62%;
+    --primary-foreground: 215 28% 10%;
+
+    --secondary: 215 25% 20%;
+    --secondary-foreground: 214 20% 95%;
+
+    --muted: 215 25% 18%;
+    --muted-foreground: 215 16% 65%;
+
+    --accent: 215 25% 22%;
+    --accent-foreground: 214 20% 95%;
+
+    --destructive: 0 62% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 215 25% 24%;
+    --input: 215 25% 24%;
+    --ring: 214 60% 55%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings:
+      'rlig' 1,
+      'calt' 1;
+  }
+
+  /* Les champs numériques de saisie de quantité sont lus de loin, parfois
+     gantés : on supprime les flèches natives, trop petites pour être utiles. */
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+
+  /* Anneau de focus systématiquement visible : la navigation au clavier doit
+     rester praticable, y compris sur les écrans de gestion denses. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
+
+@layer utilities {
+  /* Chiffres de même largeur : les colonnes de quantités restent alignées
+     d'une ligne à l'autre, ce qui rend un écart repérable d'un coup d'œil. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}

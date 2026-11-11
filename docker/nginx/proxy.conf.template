@@ -1,0 +1,107 @@
+# ------------------------------------------------------------------------------
+# Reverse proxy public d'InventAir.
+#
+# Ce fichier est un MODÈLE : l'image nginx substitue les variables
+# d'environnement listées dans NGINX_ENVSUBST_FILTER au démarrage
+# (cf. /docker-entrypoint.d/20-envsubst-on-templates.sh). Le nom de domaine
+# n'est donc jamais écrit en dur.
+#
+# Variables attendues : ${PUBLIC_DOMAIN}
+# ------------------------------------------------------------------------------
+
+# Limitation de débit au niveau du proxy, en complément de celle de l'API.
+# Elle protège aussi les ressources statiques et les requêtes qui n'atteignent
+# jamais Node (TLS, 404…).
+limit_req_zone $binary_remote_addr zone=inventair_api:10m rate=20r/s;
+limit_req_zone $binary_remote_addr zone=inventair_login:10m rate=1r/s;
+
+# Taille maximale d'un import. Doit rester >= UPLOAD_MAX_FILE_SIZE_MB côté API,
+# sinon nginx renvoie 413 avant que l'API ne puisse formuler son propre message.
+client_max_body_size 32m;
+
+# --- HTTP : uniquement le défi ACME et la redirection ---------------------------
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${PUBLIC_DOMAIN};
+
+    # Certbot dépose ici le jeton de validation. Ce chemin doit rester en clair.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# --- HTTPS ----------------------------------------------------------------------
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${PUBLIC_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${PUBLIC_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${PUBLIC_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # 180 jours : assez long pour être utile, assez court pour pouvoir revenir
+    # en arrière sans condamner les navigateurs déjà venus.
+    add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Les en-têtes de sécurité applicatifs (CSP notamment) sont posés par Helmet
+    # côté API ; on ne les duplique pas ici pour éviter deux sources de vérité.
+
+    # --- API ---
+    location /api/ {
+        limit_req zone=inventair_api burst=40 nodelay;
+
+        proxy_pass http://api:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Un import de 8 000 lignes et la génération d'un PDF dépassent le
+        # défaut de 60 s.
+        proxy_connect_timeout 10s;
+        proxy_send_timeout   300s;
+        proxy_read_timeout   300s;
+
+        # Les exports sont envoyés en flux : les tamponner ferait monter la
+        # mémoire du proxy et retarderait le premier octet.
+        proxy_buffering off;
+    }
+
+    # Le login est limité plus sévèrement : c'est la seule route où un volume
+    # de requêtes élevé n'a pas d'usage légitime.
+    location = /api/v1/auth/login {
+        limit_req zone=inventair_login burst=5 nodelay;
+
+        proxy_pass http://api:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # --- Frontend ---
+    location / {
+        proxy_pass http://web:80;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

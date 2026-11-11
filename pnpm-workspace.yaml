@@ -1,0 +1,15 @@
+# Seuls les dossiers contenant un package.json sont retenus : apps/mobile (Flutter)
+# est donc naturellement exclu du workspace Node.
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# pnpm exige une autorisation explicite pour les scripts de post-installation.
+# On n'autorise que ceux qui sont fonctionnellement nécessaires.
+allowBuilds:
+  '@prisma/client': true # génère le client typé
+  '@prisma/engines': true # télécharge les moteurs de requête
+  prisma: true # CLI de migration
+  argon2: true # binding natif de hachage
+  '@scarf/scarf': false # télémétrie uniquement
+  esbuild: true # binaire natif utilisé par Vite
