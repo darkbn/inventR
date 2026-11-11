@@ -80,7 +80,7 @@ pnpm web:dev
 
 L'API écoute sur <http://localhost:3000/api/v1>, sa documentation interactive sur
 <http://localhost:3000/api/v1/docs>, et l'interface web sur
-<http://localhost:5173>.
+<http://localhost:5273>.
 
 En développement, le serveur Vite relaie `/api` vers l'API : le navigateur ne voit
 qu'une seule origine, ce qui évite d'avoir à assouplir le CORS.
@@ -179,7 +179,7 @@ un site tiers ferait pointer son domaine vers `127.0.0.1` pour piloter le
 serveur de développement depuis le navigateur de la victime.
 
 **Un seul port suffit.** Le proxy `/api` de Vite relaie vers l'API : le
-navigateur comme l'application Android peuvent tout faire passer par 5173, et
+navigateur comme l'application Android peuvent tout faire passer par 5273, et
 le port 3000 n'a pas à être publié.
 
 Cette configuration reste un **dépannage**. Le serveur de développement n'est

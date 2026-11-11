@@ -35,7 +35,7 @@ jobs:
       DATABASE_URL: postgresql://inventair:inventair@localhost:5432/inventair?schema=inventory
       JWT_ACCESS_SECRET: secret-de-ci-uniquement-au-moins-32-caracteres
       JWT_REFRESH_SECRET: autre-secret-de-ci-au-moins-32-caracteres-aussi
-      CORS_ORIGINS: http://localhost:5173
+      CORS_ORIGINS: http://localhost:5273
       SEED_ADMIN_EMAIL: admin@inventair.local
       SEED_ADMIN_USERNAME: admin
       SEED_ADMIN_PASSWORD: MotDePasseDeCI12345

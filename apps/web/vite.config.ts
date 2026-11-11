@@ -30,9 +30,11 @@ export default defineConfig(({ mode }) => {
       alias: { '@': path.resolve(__dirname, './src') },
     },
     server: {
-      // Port configurable (`DEV_PORT`) : la valeur par défaut entre vite en
-      // conflit avec d'autres projets servis par Vite sur le même poste.
-      port: Number(env.DEV_PORT) || 5173,
+      // 5273 plutôt que le 5173 habituel de Vite : ce port-là est pris par le
+      // premier projet Vite venu, et une collision se solde par une application
+      // servie à une adresse que ni le routeur, ni le CORS, ni l'APK ne
+      // connaissent. Reste surchargeable par `DEV_PORT`.
+      port: Number(env.DEV_PORT) || 5273,
       // Sans cela, Vite glisse silencieusement sur le port suivant quand le
       // sien est pris — et l'on se retrouve à servir sur une adresse que
       // personne n'a configurée, ni le proxy, ni le routeur, ni l'APK.
