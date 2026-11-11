@@ -67,6 +67,9 @@ docker compose up -d postgres
 # 4. Schéma et données initiales
 pnpm db:deploy
 pnpm db:seed
+#    `pnpm install` a déjà généré le client Prisma. Si une commande se plaint
+#    d'un type manquant (« has no exported member Role »), c'est qu'il n'a pas
+#    été généré : relancer `pnpm db:generate`.
 
 # 5. Démarrage de l'API
 pnpm api:dev

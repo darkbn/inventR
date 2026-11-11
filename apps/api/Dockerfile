@@ -25,6 +25,11 @@ WORKDIR /app
 FROM base AS deps
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/api/package.json ./apps/api/
+# Le postinstall du paquet api appelle ce script : il doit donc exister ici,
+# sinon l'installation échoue. Il ne génère rien à cette étape — le schéma
+# n'est pas encore copié, et c'est voulu : cette couche doit rester en cache
+# tant que les dépendances ne bougent pas. La génération a lieu plus bas.
+COPY apps/api/prisma/postinstall.mjs ./apps/api/prisma/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm install --frozen-lockfile --filter @inventair/api...
 
