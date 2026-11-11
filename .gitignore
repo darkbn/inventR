@@ -22,10 +22,20 @@ logs/
 coverage/
 .nyc_output/
 
-# Données applicatives (volumes montés en dev)
-storage/
-uploads/
-reports/
+# Données applicatives : fichiers déposés, rapports générés, sauvegardes.
+#
+# Chemins ANCRÉS, et c'est essentiel : un motif sans barre oblique initiale
+# s'applique à tous les niveaux de l'arborescence. Écrit « reports/ », il
+# excluait aussi `apps/api/src/modules/reports` — du code source absent du
+# dépôt sans que rien ne le signale, et une API qui ne compile pas au clonage.
+/storage/
+/uploads/
+/reports/
+
+# Répertoire d'exécution de l'API (STORAGE_UPLOAD_DIR, STORAGE_REPORT_DIR) :
+# fichiers clients déposés et rapports générés. Exclu explicitement, puisque
+# les motifs ci-dessus ne visent plus que la racine.
+apps/api/storage/
 
 # Flutter / Android
 apps/mobile/.dart_tool/
